@@ -163,7 +163,7 @@ class MPC:
             self.model_optim.zero_grad()
             batch = self.buffer.sample(self.batch_size)
             states, actions, next_states, rewards, terminated = batch.to(self.device).unpack()
-            fails = (rewards <= (-100)).float()
+            fails = terminated
             other_rewards = rewards + 100 * fails
             predicted_states, predicted_other_rewards, predicted_fail = self.env_model(states, actions)
             state_loss = F.mse_loss(predicted_states, next_states)
