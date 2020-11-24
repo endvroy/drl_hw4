@@ -20,17 +20,22 @@ def build_nn(inp_dim, hidden_dims, out_dim):
 
 
 class EnvModel(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dims):
+    def __init__(self, state_dim, action_dim,
+                 dyn_hidden_dims,
+                 fail_hidden_dims,
+                 ):
         super().__init__()
-        self.net = build_nn(state_dim + action_dim, hidden_dims, state_dim + 1)
+        self.dyn_net = build_nn(state_dim + action_dim, dyn_hidden_dims, state_dim + 1)
+        self.fail_net = build_nn(state_dim, fail_hidden_dims, 1)
         self.state_dim = state_dim
 
     def forward(self, state, action):
         inp = torch.cat([state, action], dim=1)
-        out = self.net(inp)
-        next_state, reward = out.split([self.state_dim, 1], dim=1)
-        reward = reward.squeeze(1)
-        return next_state, reward
+        dyn_out = self.dyn_net(inp)
+        next_state, other_reward = dyn_out.split([self.state_dim, 1], dim=1)
+        fail = torch.sigmoid(self.fail_net(next_state)).squeeze(1)
+        other_reward = other_reward.squeeze(1)
+        return next_state, other_reward, fail
 
 
 class Policy(nn.Module):
@@ -123,7 +128,6 @@ def transition(state, action, next_state, reward, terminated):
 
 class MPC:
     def __init__(self,
-                 action_dim,
                  env_model,
                  policy,
                  rollout_steps,
@@ -135,7 +139,6 @@ class MPC:
                  tb_path,
                  ckpt_path):
         self.device = device
-        self.action_dim = action_dim
         self.env_model = env_model.to(self.device)
         self.policy = policy.to(self.device)
         self.rollout_steps = rollout_steps
@@ -153,16 +156,6 @@ class MPC:
         self.ckpt_path = ckpt_path
         self.global_step = 0
 
-    def rollout_traj(self, state):
-        total_reward = 0
-        actions = 2 * torch.rand((self.rollout_steps, self.action_dim)) - 1
-        for i in range(self.rollout_steps):
-            with torch.no_grad():
-                next_state, reward = self.env_model(state, actions[i])
-                state = next_state
-                total_reward += reward
-        return actions[0], total_reward
-
     def train_step(self, env, state):
         state_tensor = obs_to_tensor(state).to(self.device)
         # train env module
@@ -170,14 +163,18 @@ class MPC:
             self.model_optim.zero_grad()
             batch = self.buffer.sample(self.batch_size)
             states, actions, next_states, rewards, terminated = batch.to(self.device).unpack()
-            predicted_states, predicted_rewards = self.env_model(states, actions)
+            fails = (rewards <= (-100)).float()
+            other_rewards = rewards + 100 * fails
+            predicted_states, predicted_other_rewards, predicted_fail = self.env_model(states, actions)
             state_loss = F.mse_loss(predicted_states, next_states)
-            reward_loss = F.mse_loss(predicted_rewards, rewards)
-            model_loss = state_loss + reward_loss
+            other_reward_loss = F.mse_loss(predicted_other_rewards, other_rewards)
+            fail_loss = F.binary_cross_entropy(predicted_fail, fails)
+            model_loss = state_loss + other_reward_loss + fail_loss
             model_loss.backward()
             self.model_optim.step()
             self.writer.add_scalar('state_loss', state_loss, self.global_step)
-            self.writer.add_scalar('reward_loss', reward_loss, self.global_step)
+            self.writer.add_scalar('other_reward_loss', other_reward_loss, self.global_step)
+            self.writer.add_scalar('fail_loss', fail_loss, self.global_step)
             self.writer.add_scalar('model_loss', model_loss, self.global_step)
 
         # train policy module
@@ -186,7 +183,8 @@ class MPC:
         rollout_state = state_tensor
         for i in range(self.rollout_steps):
             action_tensor = self.policy.pick_action(rollout_state)
-            next_state, reward = self.env_model(rollout_state, action_tensor)
+            next_state, other_reward, fail = self.env_model(rollout_state, action_tensor)
+            reward = other_reward - 100 * fail
             total_reward += reward
             rollout_state = next_state
 
@@ -253,8 +251,10 @@ class MPC:
 
 
 if __name__ == '__main__':
-    env_model = EnvModel(24, 4, [100, 200, 100])
-    policy = Policy(24, [100, 200, 100], 4)
+    env_model = EnvModel(24, 4,
+                         dyn_hidden_dims=[50, 50],
+                         fail_hidden_dims=[50, 50])
+    policy = Policy(24, [50, 50], 4)
     mpc = MPC(env_model=env_model,
               policy=policy,
               rollout_steps=20,
