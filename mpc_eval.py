@@ -10,7 +10,7 @@ if __name__ == '__main__':
               n_rollout_traj=50,
               policy=policy,
               rollout_steps=20,
-              buffer_capacity=1000,
+              buffer_capacity=2000,
               batch_size=128,
               model_lr=1e-3,
               policy_lr=1e-4,

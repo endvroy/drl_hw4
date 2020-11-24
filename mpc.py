@@ -170,9 +170,12 @@ class MPC:
         actions = 2 * torch.rand((self.rollout_steps, 1, self.action_dim), device=self.device) - 1
         for i in range(self.rollout_steps):
             with torch.no_grad():
-                next_state, reward = self.env_model(state, actions[i])
+                next_state, other_reward, fail = self.env_model(state, actions[i])
                 state = next_state
-                total_reward += reward
+                total_reward += other_reward
+                if fail > 0.7:
+                    total_reward = -1000
+                    break
         return actions[0], total_reward
 
     def train_step(self, env, state):
@@ -278,7 +281,7 @@ if __name__ == '__main__':
               n_rollout_traj=50,
               policy=policy,
               rollout_steps=20,
-              buffer_capacity=1000,
+              buffer_capacity=2000,
               batch_size=128,
               model_lr=1e-3,
               policy_lr=1e-4,
