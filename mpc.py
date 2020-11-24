@@ -6,6 +6,7 @@ import numpy as np
 from collections import deque
 import random
 import os
+from operator import itemgetter
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -107,6 +108,10 @@ def action_to_tensor(action):
     return torch.from_numpy(action).float().unsqueeze(0)
 
 
+def action_tensor_to_action(action_tensor):
+    return action_tensor.squeeze(0).cpu().numpy()
+
+
 def scalar_to_tensor(scalar):
     return torch.Tensor([scalar])
 
@@ -124,6 +129,7 @@ def transition(state, action, next_state, reward, terminated):
 class MPC:
     def __init__(self,
                  action_dim,
+                 n_rollout_traj,
                  env_model,
                  policy,
                  rollout_steps,
@@ -136,6 +142,7 @@ class MPC:
                  ckpt_path):
         self.device = device
         self.action_dim = action_dim
+        self.n_rollout_traj = n_rollout_traj
         self.env_model = env_model.to(self.device)
         self.policy = policy.to(self.device)
         self.rollout_steps = rollout_steps
@@ -155,7 +162,7 @@ class MPC:
 
     def rollout_traj(self, state):
         total_reward = 0
-        actions = 2 * torch.rand((self.rollout_steps, self.action_dim)) - 1
+        actions = 2 * torch.rand((self.rollout_steps, 1, self.action_dim), device=self.device) - 1
         for i in range(self.rollout_steps):
             with torch.no_grad():
                 next_state, reward = self.env_model(state, actions[i])
@@ -180,25 +187,18 @@ class MPC:
             self.writer.add_scalar('reward_loss', reward_loss, self.global_step)
             self.writer.add_scalar('model_loss', model_loss, self.global_step)
 
-        # train policy module
-        # rollout
-        total_reward = 0
-        rollout_state = state_tensor
-        for i in range(self.rollout_steps):
-            action_tensor = self.policy.pick_action(rollout_state)
-            next_state, reward = self.env_model(rollout_state, action_tensor)
-            total_reward += reward
-            rollout_state = next_state
+        # random rollout
+        trajs = []
+        for i in range(self.n_rollout_traj):
+            traj = self.rollout_traj(state_tensor)
+            trajs.append(traj)
 
-        self.policy_optim.zero_grad()
-        neg_reward = -total_reward
-        neg_reward.backward()
-        self.policy_optim.step()
-        self.writer.add_scalar('rollout_reward', total_reward, self.global_step)
+        # find best step
+        best_action = max(trajs, key=itemgetter(1))[0]
 
         # take actual step
         with torch.no_grad():
-            actual_action = self.policy.pick_action(state_tensor).cpu().squeeze(0).numpy()
+            actual_action = action_tensor_to_action(best_action)
         actual_next_state, actual_reward, terminated, *_ = env.step(actual_action)
         trans = transition(state=state,
                            action=actual_action,
@@ -228,9 +228,16 @@ class MPC:
         total_reward = 0
         while True:
             state_tensor = obs_to_tensor(state).to(self.device)
-            with torch.no_grad():
-                action = self.policy.pick_action(state_tensor).cpu().squeeze(0).numpy()
-            next_state, reward, terminated, *_ = env.step(action)
+            # random rollout
+            trajs = []
+            for i in range(self.n_rollout_traj):
+                traj = self.rollout_traj(state_tensor)
+                trajs.append(traj)
+
+            # find best step
+            best_action = max(trajs, key=itemgetter(1))[0]
+
+            next_state, reward, terminated, *_ = env.step(action_tensor_to_action(best_action))
             total_reward += reward
             env.render()
             if terminated:
@@ -256,6 +263,8 @@ if __name__ == '__main__':
     env_model = EnvModel(24, 4, [100, 200, 100])
     policy = Policy(24, [100, 200, 100], 4)
     mpc = MPC(env_model=env_model,
+              action_dim=4,
+              n_rollout_traj=50,
               policy=policy,
               rollout_steps=20,
               buffer_capacity=1000,
