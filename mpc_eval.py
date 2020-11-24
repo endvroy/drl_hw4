@@ -1,8 +1,10 @@
 from mpc import *
 
 if __name__ == '__main__':
-    env_model = EnvModel(24, 4, [100, 200, 100])
-    policy = Policy(24, [100, 200, 100], 4)
+    env_model = EnvModel(24, 4,
+                         dyn_hidden_dims=[50, 50],
+                         fail_hidden_dims=[50, 50])
+    policy = Policy(24, [50, 50], 4)
     mpc = MPC(env_model=env_model,
               action_dim=4,
               n_rollout_traj=50,
