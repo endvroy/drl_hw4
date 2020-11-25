@@ -13,8 +13,33 @@ import json
 from collections import deque
 from datetime import datetime
 import matplotlib.pyplot as plt
-from mpc import Policy
 from env_commons import *
+
+
+def build_nn(inp_dim, hidden_dims, out_dim):
+    dims = [inp_dim] + hidden_dims + [out_dim]
+    nets = []
+    for i in range(len(dims) - 1):
+        nets.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            nets.append(nn.LeakyReLU(0.2))
+    return nn.Sequential(*nets)
+
+
+class StackedPolicy(nn.Module):
+    def __init__(self, state_dim, hidden_dims, action_dim):
+        super().__init__()
+        self.net = build_nn(4 * state_dim, hidden_dims, action_dim)
+        self.action_dim = action_dim
+
+    def forward(self, state):
+        inp = state.reshape([state.shape[0], -1])
+        out = self.net(inp)
+        actions = torch.tanh(out)
+        return actions
+
+    def pick_action(self, state):
+        return self.forward(state)
 
 
 class BipedalModule(pl.LightningModule):
@@ -32,8 +57,8 @@ class BipedalModule(pl.LightningModule):
         self.data_points = data_points
         self.dataset = None
         self.window_size = window_size
-        self.policy = Policy(24, [50, 50], 4)
-        self.example_input_array = torch.empty([1, 24], dtype=torch.float)
+        self.policy = StackedPolicy(24, [50, 50], 4)
+        self.example_input_array = torch.empty([1, 4, 24], dtype=torch.float)
         self.recording_path = recording_path
         os.makedirs(self.recording_path, exist_ok=True)
 
@@ -57,14 +82,14 @@ class BipedalModule(pl.LightningModule):
         return DataLoader(self.train_set,
                           batch_size=self.batch_size,
                           shuffle=True,
-                          num_workers=4)
+                          num_workers=6)
 
     def val_dataloader(self):
         self.load_and_split_dataset()
         return DataLoader(self.val_set,
                           batch_size=self.batch_size,
                           shuffle=False,
-                          num_workers=4)
+                          num_workers=6)
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.policy.parameters(),
@@ -100,10 +125,10 @@ class BipedalModule(pl.LightningModule):
         env = gym.make('CarRacing-v0').unwrapped
         state = env.reset()
         # maintain a window of history
-        window = deque(maxlen=self.window_size)
+        window = deque(maxlen=4)
         # fill in initial value of blank
-        for i in range(self.window_size):
-            window.append(torch.zeros((96, 96)))
+        for i in range(4):
+            window.append(torch.zeros((1, 24)))
 
         captured = []
 
@@ -138,10 +163,16 @@ class BipedalModule(pl.LightningModule):
         episode_reward = 0
 
         state = env.reset()
+        # maintain a window of history
+        window = deque(maxlen=4)
+        # fill in initial value of blank
+        for i in range(4):
+            window.append(torch.zeros((1, 24)))
 
         while True:
             state = obs_to_tensor(state).to(self.device)
-            obs = state
+            window.append(state)
+            obs = torch.stack(list(window)).unsqueeze(0)
             with torch.no_grad():
                 action_tensor = self.policy(obs)
             action = action_tensor_to_action(action_tensor)
