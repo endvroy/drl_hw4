@@ -18,4 +18,4 @@ if __name__ == '__main__':
               tb_path='mpc_logs',
               ckpt_path='mpc_logs')
     mpc.load_checkpoint('mpc_logs/5000.pt')
-    mpc.eval()
+    mpc.random_capture()

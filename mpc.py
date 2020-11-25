@@ -8,6 +8,7 @@ import random
 import os
 from env_commons import *
 from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 
 
 def build_nn(inp_dim, hidden_dims, out_dim):
@@ -199,7 +200,7 @@ class MPC:
         return actual_next_state, terminated
 
     def train(self):
-        self.pretrain_env_model()
+        # self.pretrain_env_model()
 
         env = gym.make('BipedalWalkerHardcore-v3')
         state = env.reset()
@@ -229,6 +230,30 @@ class MPC:
             else:
                 state = next_state
         print(total_reward)
+
+    def random_capture(self):
+        captured = []
+
+        env = gym.make('BipedalWalkerHardcore-v3')
+        state = env.reset()
+        while True:
+            state_tensor = obs_to_tensor(state).to(self.device)
+            with torch.no_grad():
+                action = self.policy.pick_action(state_tensor).cpu().squeeze(0).numpy()
+            next_state, reward, terminated, *_ = env.step(action)
+            if torch.rand([1]) < 0.1 and len(captured) < 6:
+                captured.append(env.render(mode='rgb_array'))
+            env.render()
+            if terminated or len(captured) >= 6:
+                break
+            else:
+                state = next_state
+
+        env.close()
+
+        for i, img in enumerate(captured):
+            plt.imshow(img)
+            plt.savefig(f'dqn_{i}.png')
 
     def save_checkpoint(self):
         checkpoint = {
