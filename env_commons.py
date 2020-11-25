@@ -1,18 +1,33 @@
 import torch
-from torch.utils.data import Dataset,DataLoader
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
 import pickle
 
 
 def obs_to_tensor(obs):
-    return torch.from_numpy(obs).float().unsqueeze(0)
+    return torch.from_numpy(obs.astype(np.float)).float().unsqueeze(0)
 
 
 def action_to_tensor(action):
     return torch.from_numpy(action).float().unsqueeze(0)
 
 
+def action_tensor_to_action(action_tensor):
+    return action_tensor.squeeze(0).cpu().numpy()
+
+
 def scalar_to_tensor(scalar):
     return torch.Tensor([scalar])
+
+
+def transition(state, action, next_state, reward, terminated):
+    return TransitionBatch(
+        state=obs_to_tensor(state),
+        action=action_to_tensor(action),
+        next_state=obs_to_tensor(next_state),
+        reward=scalar_to_tensor(reward),
+        terminated=scalar_to_tensor(terminated)
+    )
 
 
 class TransitionBatch:
