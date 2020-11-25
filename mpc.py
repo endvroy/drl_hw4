@@ -6,6 +6,7 @@ import numpy as np
 from collections import deque
 import random
 import os
+from env_commons import *
 from torch.utils.tensorboard import SummaryWriter
 
 
@@ -53,40 +54,6 @@ class Policy(nn.Module):
         return self.forward(state)
 
 
-class TransitionBatch:
-    def __init__(self, state, action, next_state, reward, terminated):
-        self.state = state
-        self.action = action
-        self.next_state = next_state
-        self.reward = reward
-        self.terminated = terminated
-
-    def __len__(self):
-        return self.state.shape[0]
-
-    def to(self, device):
-        return TransitionBatch(
-            state=self.state.to(device),
-            action=self.action.to(device),
-            next_state=self.next_state.to(device),
-            reward=self.reward.to(device),
-            terminated=self.terminated.to(device)
-        )
-
-    def unpack(self):
-        return self.state, self.action, self.next_state, self.reward, self.terminated
-
-
-def cat_transitions(transitions):
-    return TransitionBatch(
-        state=torch.cat([transition.state for transition in transitions]),
-        action=torch.cat([transition.action for transition in transitions]),
-        next_state=torch.cat([transition.next_state for transition in transitions]),
-        reward=torch.cat([transition.reward for transition in transitions]),
-        terminated=torch.cat([transition.terminated for transition in transitions]),
-    )
-
-
 class TransitionBuffer:
     def __init__(self, capacity):
         self.mem = deque(maxlen=capacity)
@@ -132,10 +99,12 @@ class MPC:
                  policy,
                  rollout_steps,
                  buffer_capacity,
+                 pretrain_batch_size,
                  batch_size,
                  model_lr,
                  policy_lr,
                  device,
+                 dataset_path,
                  tb_path,
                  ckpt_path):
         self.device = device
@@ -144,11 +113,13 @@ class MPC:
         self.rollout_steps = rollout_steps
         self.buffer_capacity = buffer_capacity
         self.buffer = TransitionBuffer(capacity=self.buffer_capacity)
+        self.pretrain_batch_size = pretrain_batch_size
         self.batch_size = batch_size
         self.model_lr = model_lr
         self.policy_lr = policy_lr
         self.model_optim = torch.optim.Adam(self.env_model.parameters(), lr=self.model_lr)
         self.policy_optim = torch.optim.Adam(self.policy.parameters(), lr=self.policy_lr)
+        self.dataset_path = dataset_path
         os.makedirs(tb_path, exist_ok=True)
         os.makedirs(ckpt_path, exist_ok=True)
         self.tb_path = tb_path
@@ -156,22 +127,42 @@ class MPC:
         self.ckpt_path = ckpt_path
         self.global_step = 0
 
+    def config_dataloader(self):
+        self.dataset = BipedalDataset(self.dataset_path)
+        self.dataloader = DataLoader(self.dataset, batch_size=self.pretrain_batch_size, shuffle=True)
+
+    def pretrain_env_model(self):
+        self.config_dataloader()
+        it = iter(self.dataloader)
+        for step in range(1000):
+            batch = next(it)
+            trans_batch = TransitionBatch(**batch).to(self.device)
+            state_loss, other_reward_loss, fail_loss, model_loss = self.train_env_model_step(trans_batch)
+            self.writer.add_scalar('pretrain_state_loss', state_loss)
+            self.writer.add_scalar('pretrain_other_reward_loss', other_reward_loss)
+            self.writer.add_scalar('pretrain_fail_loss', fail_loss)
+            self.writer.add_scalar('pretrain_model_loss', model_loss)
+
+    def train_env_model_step(self, batch):
+        self.model_optim.zero_grad()
+        states, actions, next_states, rewards, terminated = batch.to(self.device).unpack()
+        fails = terminated
+        other_rewards = rewards + 100 * fails
+        predicted_states, predicted_other_rewards, predicted_fail = self.env_model(states, actions)
+        state_loss = F.mse_loss(predicted_states, next_states)
+        other_reward_loss = F.mse_loss(predicted_other_rewards, other_rewards)
+        fail_loss = F.binary_cross_entropy(predicted_fail, fails)
+        model_loss = state_loss + other_reward_loss + fail_loss
+        model_loss.backward()
+        self.model_optim.step()
+        return state_loss, other_reward_loss, fail_loss, model_loss
+
     def train_step(self, env, state):
         state_tensor = obs_to_tensor(state).to(self.device)
         # train env module
         if self.global_step > self.batch_size:
-            self.model_optim.zero_grad()
             batch = self.buffer.sample(self.batch_size)
-            states, actions, next_states, rewards, terminated = batch.to(self.device).unpack()
-            fails = terminated
-            other_rewards = rewards + 100 * fails
-            predicted_states, predicted_other_rewards, predicted_fail = self.env_model(states, actions)
-            state_loss = F.mse_loss(predicted_states, next_states)
-            other_reward_loss = F.mse_loss(predicted_other_rewards, other_rewards)
-            fail_loss = F.binary_cross_entropy(predicted_fail, fails)
-            model_loss = state_loss + other_reward_loss + fail_loss
-            model_loss.backward()
-            self.model_optim.step()
+            state_loss, other_reward_loss, fail_loss, model_loss = self.train_env_model_step(batch)
             self.writer.add_scalar('state_loss', state_loss, self.global_step)
             self.writer.add_scalar('other_reward_loss', other_reward_loss, self.global_step)
             self.writer.add_scalar('fail_loss', fail_loss, self.global_step)
@@ -208,6 +199,8 @@ class MPC:
         return actual_next_state, terminated
 
     def train(self):
+        self.pretrain_env_model()
+
         env = gym.make('BipedalWalkerHardcore-v3')
         state = env.reset()
         for i in range(5000):
@@ -259,10 +252,12 @@ if __name__ == '__main__':
               policy=policy,
               rollout_steps=20,
               buffer_capacity=1000,
+              pretrain_batch_size=256,
               batch_size=128,
               model_lr=1e-3,
               policy_lr=1e-4,
               device=torch.device('cuda'),
+              dataset_path='data.pkl',
               tb_path='mpc_logs',
               ckpt_path='mpc_logs')
     mpc.train()
